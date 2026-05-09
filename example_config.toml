@@ -1,0 +1,37 @@
+# NOTE: through this file I will refer to macro mode as the mode you are in that intercepts your keystrokes to execute macros
+# whereas normal mode is the default mode where your key strokes are processed normally as if the program weren't running
+
+[general]
+# NOTE: the trigger key should be a key that you don't use for other purposes
+# as it will be intercepted by the program and other programs won't see you press it
+trigger_key = "menu"
+# trigger_modes lets you set how you want to activate/deactivate macro mode 
+# toggle will make it so that each time you press the trigger_key it will toggle between macro mode and normal mode
+# hold makes it so that you are only in macro mode while you hold down the trigger key
+# one_shot, the default, maintains the same behavior as hold except if you press the trigger_key without triggering any macros between you pressing it and releasing it, it will treat the next key strokes as a trigger, until you trigger a macro or hit the trigger_key again.
+trigger_mode = "one_shot"
+
+[macros]
+# macros for their value should follow the form <command> or <command> <params>
+
+# run_user <script> runs a script sourced from the <config_dir>/scripts directory
+# the <script> must be a name that matches a executable in that directory if you want it to run
+
+# run_root <script> runs scripts sourced from /etc/macro_misdirect/scripts
+# the script must exist, be executable and usually needs a shebang if it is a shell file
+# I suppose you could also technically put a executable binary in that directory as well
+
+# write <text> will write whatever the text is
+
+# reload puts the user back in normal mode and reloads the config.
+
+# terminate, terminates the program
+
+#examples:
+cn = "run_user cool_not"
+dw = "run_user double_who"
+dww = "run_user who"
+sw = "run_root who"
+ng = "write nothing "
+rl = "reload"
+tm = "terminate"
