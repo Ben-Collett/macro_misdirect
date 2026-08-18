@@ -9,13 +9,21 @@ import atexit
 from ._nixlibudev import set_up_libudev, create_udev_monitor, monitor_on_add
 from time import time as now
 from time import sleep
-from threading import Thread
+from threading import Thread, Lock
 from glob import glob
 from multiprocessing import Queue, Process
+import queue
 
 # EVIOCGRAB ioctl: grab/release exclusive access to evdev device
 # Argument: 1 to grab, 0 to release
 EVIOCGRAB = 0x40044590
+
+# EVIOCGKEY ioctl: get the current state of all keys as a bitmask,
+# one bit per key code. The ioctl number encodes the size of the
+# state buffer: _IOC(_IOC_READ, 'E', 0x18, size).
+# KEY_MAX (0x2ff) + 1 bits = 96 bytes.
+KEY_STATE_SIZE = (0x2ff + 1) // 8
+EVIOCGKEY = (2 << 30) | (KEY_STATE_SIZE << 16) | (0x45 << 8) | 0x18
 
 # l = long, H = unsigned short,I = unsigned int
 event_bin_format = "llHHI"
@@ -104,7 +112,8 @@ class EventDevice(object):
 
     def read_event(self):
         data = self.input_file.read(struct.calcsize(event_bin_format))
-        seconds, microseconds, type, code, value = struct.unpack(event_bin_format, data)
+        seconds, microseconds, type, code, value = struct.unpack(
+            event_bin_format, data)
 
         return (
             seconds + microseconds / 1e6,
@@ -124,10 +133,35 @@ class EventDevice(object):
         )
 
         # Send a sync event to ensure other programs update.
-        sync_event = struct.pack(event_bin_format, seconds, microseconds, EV_SYN, 0, 0)
+        sync_event = struct.pack(
+            event_bin_format, seconds, microseconds, EV_SYN, 0, 0)
 
         self.output_file.write(data_event + sync_event)
         self.output_file.flush()
+
+    def has_keys_down(self):
+        """Return True if any key on this device is currently pressed.
+
+        Uses the EVIOCGKEY ioctl to read the kernel's key state bitmap.
+        Raises OSError if the device is unavailable.
+        """
+        return bool(self.keys_down())
+
+    def keys_down(self):
+        """Return the set of key codes currently pressed on this device.
+
+        Uses the EVIOCGKEY ioctl to read the kernel's key state bitmap,
+        one bit per key code. Raises OSError if the device is unavailable.
+        """
+        fd = self.input_file.fileno()
+        state = bytearray(KEY_STATE_SIZE)
+        fcntl.ioctl(fd, EVIOCGKEY, state)
+        keys = set()
+        for byte_index, byte in enumerate(state):
+            for bit in range(8):
+                if byte & (1 << bit):
+                    keys.add(byte_index * 8 + bit)
+        return keys
 
     def grab(self):
         """Grab exclusive access to this device. Other processes won't receive events."""
@@ -140,7 +174,7 @@ class EventDevice(object):
         fcntl.ioctl(fd, EVIOCGRAB, 0)
 
 
-def device_reader_worker(device_paths, event_queue, command_queue, virtual_name):
+def device_reader_worker(device_paths, event_queue, command_queue, response_queue, virtual_name):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     devices = [EventDevice(p) for p in device_paths]
 
@@ -153,15 +187,34 @@ def device_reader_worker(device_paths, event_queue, command_queue, virtual_name)
         return device.sysfs_name == virtual_name
 
     def grab_device(device):
-        """Grab a device if it's not the virtual keyboard."""
+        """Grab a device if it's not the virtual keyboard, waiting until
+        all of its keys are released first so no key gets stuck down."""
         if is_virtual_device(device):
             return False
+        if device.path in grabbed_devices:
+            return True
+        Thread(target=grab_when_keys_released,
+               args=(device,), daemon=True).start()
+        return True
+
+    # 5MS
+    GRAB_POLLING_DELAY_S = 0.005
+
+    def grab_when_keys_released(device):
+        """Wait for the device's keys to be released, then grab it.
+
+        Runs in a background thread so the caller isn't blocked. Gives up
+        silently if the device disconnects before the grab completes.
+        """
         try:
+            while is_grabbed[0] and device.has_keys_down():
+                sleep(GRAB_POLLING_DELAY_S)
+            if not is_grabbed[0]:
+                return
             device.grab()
             grabbed_devices.add(device.path)
-            return True
         except OSError:
-            return False
+            pass
 
     def ungrab_device(device):
         """Release a grabbed device."""
@@ -201,6 +254,7 @@ def device_reader_worker(device_paths, event_queue, command_queue, virtual_name)
                 if device.path == path:
                     ungrab_device(device)
                     break
+
     def command_listener():
         """Listen for grab/ungrab commands from main process."""
         while True:
@@ -214,6 +268,14 @@ def device_reader_worker(device_paths, event_queue, command_queue, virtual_name)
                     if is_grabbed[0]:
                         is_grabbed[0] = False
                         ungrab_all_connected()
+                elif cmd == 'keys_down':
+                    keys = set()
+                    for device in devices:
+                        try:
+                            keys.update(device.keys_down())
+                        except (OSError, AttributeError):
+                            pass
+                    response_queue.put(keys)
             except OSError:
                 break
 
@@ -236,6 +298,8 @@ class AggregatedEventDevice:
     def __init__(self, devices, output=None, virtual_name=None):
         self.event_queue = Queue()
         self.command_queue = Queue()  # For sending grab/ungrab commands
+        self.response_queue = Queue()  # For receiving key state replies
+        self._keys_lock = Lock()  # Serializes keys_down() requests
 
         self.output = output  # stays in parent only
         self.grabbed = False
@@ -243,7 +307,8 @@ class AggregatedEventDevice:
 
         self.process = Process(
             target=device_reader_worker,
-            args=(paths, self.event_queue, self.command_queue, virtual_name),
+            args=(paths, self.event_queue, self.command_queue,
+                  self.response_queue, virtual_name),
             daemon=True,
         )
         self.process.start()
@@ -267,6 +332,26 @@ class AggregatedEventDevice:
             self.grabbed = False
             self.command_queue.put('ungrab')
 
+    def keys_down(self):
+        """Return the set of key codes currently pressed on any device.
+
+        Asks the worker process to read the kernel's key state bitmap on
+        each device via the EVIOCGKEY ioctl and merges the results.
+        Raises OSError if the worker does not reply in time or if no
+        device could be queried.
+        """
+        with self._keys_lock:
+            self.command_queue.put('keys_down')
+            try:
+                return self.response_queue.get(timeout=2)
+            except queue.Empty:
+                import warnings
+                warnings.warn(
+                    "timed out trying to read keyboard state, this is likely a bug in the keyboard module",
+                    stacklevel=2,
+                )
+                return {}
+
 
 device_pattern = r"""N: Name="([^"]+?)".+?H: Handlers=([^\n]+)"""
 
@@ -286,7 +371,8 @@ def list_devices_from_proc(type_name):
 
 def list_devices_from_by_id(name_suffix, by_id=True):
     for path in glob(
-        "/dev/input/{}/*-event-{}".format("by-id" if by_id else "by-path", name_suffix)
+        "/dev/input/{}/*-event-{}".format(
+            "by-id" if by_id else "by-path", name_suffix)
     ):
         yield EventDevice(path)
 

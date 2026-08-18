@@ -19,7 +19,6 @@ import itertools as _itertools
 import re as _re
 
 
-
 """
 keyboard
 ========
@@ -228,8 +227,8 @@ def _is_number(x):
     return isinstance(x, int)
 
 
-def _unsafe_propagate(event:KeyboardEvent):
-    key = event.scan_code 
+def _unsafe_propagate(event: KeyboardEvent):
+    key = event.scan_code
     if key is None:
         key = event.name
 
@@ -464,7 +463,7 @@ def init(
     linux_collision_safety_mode=None,
     windows_synetic_mode: WindowsSyntheticModes = WindowsSyntheticModes.FAKE,
     keyboard_mode=None,
-    auto_grab= False,
+    auto_grab=False,
     device_name: str = "PyKeys Virtual Keyboard",
 ):
     global _os_keyboard, _listener, _initialized, _keyboard_mode, _device_name
@@ -634,14 +633,14 @@ def send(hotkey, do_press=True, do_release=True):
             with _virtually_pressed_events_lock:
                 for scan_codes in step:
                     _virtually_pressed_events.add(scan_codes[0])
-                    _get_os_keyboard().press(scan_codes[0], "shift" in scan_codes[1:] if len(scan_codes) > 1 else False)
+                    _get_os_keyboard().press(scan_codes[0])
 
         if do_release:
             with _virtually_pressed_events_lock:
                 for scan_codes in reversed(step):
                     if scan_codes[0] in _virtually_pressed_events:
                         _virtually_pressed_events.remove(scan_codes[0])
-                    _get_os_keyboard().release(scan_codes[0], "shift" in scan_codes[1:] if len(scan_codes) > 1 else False)
+                    _get_os_keyboard().release(scan_codes[0])
 
 
 def press(hotkey):
@@ -1213,6 +1212,7 @@ def write(text, delay=0, restore_state_after=True, exact=None):
 
     # Window's typing of unicode characters is quite efficient and should be preferred.
     if exact:
+        print("this is exact")
         for letter in text:
             if letter in "\n\b":
                 send(letter)
@@ -1483,7 +1483,7 @@ def end_patient_collision_safe_mode():
     if not _initialized:
         init()
     if _keyboard_mode == KeyboardModes.LINUX:
-        _get_os_keyboard().patient_type = True
+        _get_os_keyboard().patient_type = False
 
 
 def play(events, speed_factor=1.0):
@@ -1616,8 +1616,6 @@ def add_abbreviation(source_text, replacement_text, match_suffix=False, timeout=
     )
 
 
-
-
 def grab():
     """
     Grab exclusive access to all keyboards except the one created by the program.
@@ -1655,12 +1653,15 @@ def ungrab():
     if os_keyboard:
         os_keyboard.ungrab()
 
+
 def is_grabbed():
     os_keyboard = _get_os_keyboard()
     if os_keyboard:
         return os_keyboard.is_grabbed()
     return False
-def propagate(key_event:KeyboardEvent):
+
+
+def propagate(key_event: KeyboardEvent):
     """
     propagates any key event if the device is not grabbed
     and the event is not from the virtual keyboard
@@ -1682,4 +1683,3 @@ unremap_hotkey = remove_hotkey
 unhook_key = unhook
 unblock_key = unhook_key
 unremap_key = unhook_key
-

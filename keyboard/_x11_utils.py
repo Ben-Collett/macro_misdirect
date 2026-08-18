@@ -563,10 +563,6 @@ class X11:
                 libX11.XFreeEventData(self.display, ctypes.byref(cookie))
 
     def map_name(self, name):
-        # name = normalize_name(name)
-        # print(name)
-        # if name in CHAR_TO_KEYSYM:
-        #     name = CHAR_TO_KEYSYM[name]
 
         if name in reversed_names.keys():
             name = reversed_names[name]
